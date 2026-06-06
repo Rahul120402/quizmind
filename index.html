@@ -1604,7 +1604,7 @@ function prepareTextChunk(text, maxWords) {
 // Core Gemini API caller
 async function callGemini(promptText) {
   // gemini-1.5-flash-latest is FREE and has higher rate limits than 2.0
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${APP.apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${APP.apiKey}`;
 
   let res;
   try {
