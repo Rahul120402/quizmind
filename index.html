@@ -1550,7 +1550,7 @@ async function extractPDFText(file) {
         let fullText = '';
         const totalPages = pdf.numPages;
         addLog(`📄 Found ${totalPages} pages`, 'active');
-        for (let i = 1; i <= Math.min(totalPages, 20); i++) {
+        for (let i = 1; i <= Math.min(totalPages, 25); i++) {
           const page = await pdf.getPage(i);
           const content = await page.getTextContent({ normalizeWhitespace: true });
           // Reconstruct text with proper spacing
@@ -1577,224 +1577,194 @@ async function extractPDFText(file) {
 }
 
 // ============================================================
-// AI QUESTION GENERATION — BATCHED (supports up to 100 Qs)
+// ============================================================
+// AI QUESTION GENERATION — SINGLE SMART CALL
 // ============================================================
 
-// Single Gemini API call
-async function callGemini(prompt) {
-  // Use v1 endpoint (better CORS support) without responseMimeType
-  // which forces plain text JSON we parse ourselves
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${APP.apiKey}`;
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  let response;
+// Clean and smartly trim text for API
+function prepareTextChunk(text, maxWords) {
+  const words = text.split(/\s+/).filter(w => w.length > 0);
+  if (words.length <= maxWords) return text;
+  // Take start (40%) + middle (20%) + end (40%) for best coverage
+  const s = Math.floor(maxWords * 0.4);
+  const m = Math.floor(maxWords * 0.2);
+  const e = Math.floor(maxWords * 0.4);
+  const mid = Math.floor(words.length / 2);
+  return [
+    words.slice(0, s).join(' '),
+    '\n\n... [middle of document] ...\n\n',
+    words.slice(mid - Math.floor(m/2), mid + Math.floor(m/2)).join(' '),
+    '\n\n... [end of document] ...\n\n',
+    words.slice(-e).join(' ')
+  ].join('');
+}
+
+// Core Gemini API caller
+async function callGemini(promptText) {
+  // gemini-1.5-flash-latest is FREE and has higher rate limits than 2.0
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${APP.apiKey}`;
+
+  let res;
   try {
-    response = await fetch(geminiUrl, {
+    res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
+        contents: [{ role: 'user', parts: [{ text: promptText }] }],
         generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 4096
-          // No responseMimeType — plain text, more compatible
-        }
+          temperature: 0.4,
+          maxOutputTokens: 8192,
+          topP: 0.8
+        },
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+        ]
       })
     });
-  } catch(networkErr) {
-    // Network/CORS error
-    throw new Error('Network error. Make sure you are connected to internet and not blocking the API.');
-  }
-
-  if (!response.ok) {
-    let errBody = {};
-    try { errBody = await response.json(); } catch(e) {}
-    const msg = errBody.error?.message || '';
-    if (response.status === 400) throw new Error('Invalid Gemini API key. Get free key at aistudio.google.com');
-    if (response.status === 403) throw new Error('API key does not have permission. Enable Gemini API at aistudio.google.com');
-    if (response.status === 429) throw new Error('Rate limit hit. Auto-retrying...');
-    throw new Error(msg || `API error ${response.status}`);
-  }
-
-  const data = await response.json();
-
-  // Handle safety blocks
-  const candidate = data.candidates?.[0];
-  if (!candidate) throw new Error('Gemini returned no candidates. Try again or reduce question count.');
-  if (candidate.finishReason === 'SAFETY') throw new Error('Content blocked by safety filter. Try a different PDF.');
-
-  const rawText = (candidate.content?.parts?.[0]?.text || '').trim();
-  if (!rawText) throw new Error('Gemini returned empty text. Try again.');
-
-  // Extract JSON — handle markdown code blocks too
-  let jsonStr = rawText;
-  // Remove markdown code fences if present
-  jsonStr = jsonStr.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
-  // Find JSON object
-  const jsonStart = jsonStr.indexOf('{');
-  const jsonEnd = jsonStr.lastIndexOf('}');
-  if (jsonStart !== -1 && jsonEnd !== -1) {
-    jsonStr = jsonStr.slice(jsonStart, jsonEnd + 1);
-  }
-
-  try {
-    return JSON.parse(jsonStr);
   } catch(e) {
-    console.error('JSON parse failed. Raw response:', rawText.substring(0, 500));
-    throw new Error('Could not parse AI response as JSON. Try again.');
+    throw new Error('Cannot reach Gemini API. Check your internet connection.');
   }
-}
 
-// Sleep helper for rate limit retry
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-// Split text into N equal chunks for batch processing
-function splitTextIntoChunks(text, numChunks) {
-  const words = text.split(/\s+/);
-  const chunkSize = Math.floor(words.length / numChunks);
-  const chunks = [];
-  for (let i = 0; i < numChunks; i++) {
-    const start = i * chunkSize;
-    const end = i === numChunks - 1 ? words.length : start + chunkSize;
-    chunks.push(words.slice(start, end).join(' '));
+  if (!res.ok) {
+    let body = {};
+    try { body = await res.json(); } catch(_) {}
+    const msg = body?.error?.message || '';
+    if (res.status === 400) throw new Error('Bad API key or request. ' + msg);
+    if (res.status === 403) throw new Error('API key blocked. Enable Gemini API at aistudio.google.com. ' + msg);
+    if (res.status === 429) throw new Error('RATE_LIMIT');
+    throw new Error(msg || `HTTP ${res.status}`);
   }
-  return chunks;
+
+  const json = await res.json();
+  const candidate = json.candidates?.[0];
+  if (!candidate) throw new Error('No response from Gemini. Try again.');
+  if (candidate.finishReason === 'SAFETY') throw new Error('Response blocked by safety filter.');
+
+  const raw = candidate.content?.parts?.[0]?.text?.trim() || '';
+  if (!raw) throw new Error('Empty response from Gemini. Try again.');
+  return raw;
 }
 
-// Build the question generation prompt
-function buildPrompt(chunk, batchCount, totalCount, difficulty, typeStr, startId, topics) {
-  const difficultyGuide = {
-    easy: 'straightforward recall and basic understanding',
-    medium: 'application and analysis requiring understanding of concepts',
-    hard: 'synthesis, evaluation, and critical thinking',
-    mixed: 'a mix of easy (30%), medium (50%), and hard (20%)'
-  }[difficulty] || 'medium';
-
-  return `You are an expert educational assessment designer.
-Analyze the document content below and generate exactly ${batchCount} high-quality quiz questions.
-These are questions ${startId} to ${startId + batchCount - 1} of a ${totalCount}-question quiz.
-${topics.length ? 'Known topics from this document: ' + topics.join(', ') : ''}
-
-DOCUMENT CONTENT:
-${chunk}
-
-STRICT RULES:
-- Generate EXACTLY ${batchCount} questions, no more no less
-- Question types: ${typeStr}
-- Difficulty: ${difficulty} (${difficultyGuide})
-- Base questions ONLY on the provided content
-- Make each question unique — no repeats
-- Start question IDs from ${startId}
-
-OUTPUT: valid JSON only, no markdown:
-{
-  "topics": ["topic1"],
-  "summary": "brief summary",
-  "questions": [
-    {
-      "id": ${startId},
-      "type": "mcq",
-      "topic": "topic name",
-      "difficulty": "${difficulty === 'mixed' ? 'easy|medium|hard' : difficulty}",
-      "text": "Question?",
-      "options": ["A", "B", "C", "D"],
-      "answer": 0,
-      "explanation": "Why this is correct and others wrong",
-      "timeEstimate": 45
-    }
-  ]
-}
-For True/False: options:["True","False"], answer:0 or 1
-For Fill Blank: options:["correct","wrong1","wrong2","wrong3"], answer:0, text has ___
-For Assertion-Reason: options:["Both true, R explains A","Both true, R not explain A","A true R false","A false R true"]
-
-Generate all ${batchCount} questions now:`;
+// Parse JSON safely from Gemini text output
+function parseJSON(raw) {
+  // Strip markdown fences
+  let s = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+  // Find outermost { }
+  const a = s.indexOf('{'), b = s.lastIndexOf('}');
+  if (a !== -1 && b !== -1) s = s.slice(a, b + 1);
+  return JSON.parse(s);
 }
 
+// Generate all questions in ONE call — most reliable approach
 async function generateQuestionsWithAI(text, config) {
   const { difficulty, count, types } = config;
   const selectedTypes = Array.isArray(types) ? types : [types];
+
   const typeInstructions = {
-    mcq: 'MCQ (4 options)',
-    truefalse: 'True/False',
-    fitb: 'Fill in the Blank (use ___ for blank)',
-    ar: 'Assertion-Reason'
+    mcq:      'MCQ — 4 options (A/B/C/D), exactly one correct',
+    truefalse:'True/False — options must be exactly ["True","False"]',
+    fitb:     'Fill in the Blank — sentence with ___ , options: [correct, wrong1, wrong2, wrong3]',
+    ar:       'Assertion-Reason — options: ["Both A&R true, R explains A","Both A&R true, R does not explain A","A true R false","A false"]'
   };
-  const typeStr = selectedTypes.map(t => typeInstructions[t] || t).join(', ');
+  const typeStr = selectedTypes.map(t => typeInstructions[t] || t).join('\n');
 
-  // Decide batch strategy based on count
-  // Each batch = max 25 questions to stay within Gemini limits
-  const BATCH_SIZE = 25;
-  const numBatches = Math.ceil(count / BATCH_SIZE);
-  const words = text.split(/\s+/);
+  const diffMap = {
+    easy:  'Easy: basic recall, definitions, direct facts from text',
+    medium:'Medium: conceptual understanding, cause-effect, application',
+    hard:  'Hard: analysis, evaluation, inference, multi-step reasoning',
+    mixed: 'Mixed: 30% easy, 50% medium, 20% hard'
+  };
+  const diffGuide = diffMap[difficulty] || diffMap.medium;
 
-  // Use more text per batch for better quality — 2500 words per chunk
-  const WORDS_PER_CHUNK = 2500;
-  const textChunks = splitTextIntoChunks(text, Math.max(numBatches, Math.ceil(words.length / WORDS_PER_CHUNK)));
+  // Smart text extraction — 3500 words is safe for gemini-1.5-flash-latest
+  const chunk = prepareTextChunk(text, 3500);
 
-  addLog(`📦 Total questions: ${count} → ${numBatches} batch(es) of ~${BATCH_SIZE}`, 'active');
+  const prompt = `You are an expert exam question designer with 20 years of experience creating high-quality educational assessments.
 
-  let allQuestions = [];
-  let allTopics = [];
-  let summary = '';
+DOCUMENT CONTENT TO USE:
+---
+${chunk}
+---
 
-  for (let batch = 0; batch < numBatches; batch++) {
-    const batchCount = Math.min(BATCH_SIZE, count - allQuestions.length);
-    const chunkIndex = batch % textChunks.length;
-    const chunk = textChunks[chunkIndex];
-    const startId = allQuestions.length + 1;
+YOUR TASK:
+Generate exactly ${count} quiz questions based ONLY on the above document content.
 
-    addLog(`🤖 Batch ${batch + 1}/${numBatches}: Generating questions ${startId}–${startId + batchCount - 1}...`, 'active');
-    setProgress(30 + ((batch / numBatches) * 60));
+QUESTION TYPES TO USE:
+${typeStr}
 
-    let attempts = 0;
-    let parsed = null;
+DIFFICULTY: ${diffGuide}
 
-    while (attempts < 3 && !parsed) {
-      try {
-        const prompt = buildPrompt(chunk, batchCount, count, difficulty, typeStr, startId, allTopics);
-        parsed = await callGemini(prompt);
-      } catch(err) {
-        attempts++;
-        if (err.message.includes('Rate limit') || err.message.includes('429')) {
-          addLog(`⏳ Rate limit hit — waiting 15s before retry (${attempts}/3)...`, 'active');
-          await sleep(15000);
-        } else if (attempts >= 3) {
-          throw err;
-        } else {
-          addLog(`⚠️ Retry ${attempts}/3...`, 'active');
-          await sleep(3000);
-        }
+CRITICAL RULES:
+1. Generate EXACTLY ${count} questions — not more, not less
+2. Every question must be answerable from the document content
+3. No duplicate questions
+4. Options must be plausible and well-written
+5. Explanation must clearly justify the correct answer
+6. answer field = 0-based index of correct option in the options array
+
+RESPOND WITH ONLY THIS JSON (no markdown, no explanation, just raw JSON):
+{
+  "topics": ["main topic 1", "main topic 2"],
+  "summary": "2 sentence summary of the document",
+  "questions": [
+    {
+      "id": 1,
+      "type": "mcq",
+      "topic": "topic this question belongs to",
+      "difficulty": "easy",
+      "text": "Full question text here?",
+      "options": ["Option A text", "Option B text", "Option C text", "Option D text"],
+      "answer": 0,
+      "explanation": "Detailed explanation: why answer A is correct, and why B/C/D are wrong.",
+      "timeEstimate": 45
+    }
+  ]
+}`;
+
+  // Try up to 3 times with exponential backoff
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      addLog(`🤖 Calling Gemini AI (attempt ${attempt}/3)...`, 'active');
+      const raw = await callGemini(prompt);
+      addLog('🔍 Parsing response...', 'active');
+
+      const parsed = parseJSON(raw);
+
+      if (!parsed.questions || !Array.isArray(parsed.questions)) {
+        throw new Error('Invalid response structure — missing questions array');
       }
-    }
+      if (parsed.questions.length === 0) {
+        throw new Error('Gemini returned 0 questions. Try again.');
+      }
 
-    if (!parsed || !parsed.questions) throw new Error(`Batch ${batch+1} failed. Try fewer questions.`);
+      addLog(`✅ Got ${parsed.questions.length} questions from Gemini!`, 'done');
+      return parsed;
 
-    // Collect topics and summary from first batch
-    if (batch === 0) {
-      allTopics = parsed.topics || [];
-      summary = parsed.summary || '';
-    } else {
-      allTopics = [...new Set([...allTopics, ...(parsed.topics || [])])];
-    }
+    } catch(err) {
+      lastErr = err;
+      console.error(`Attempt ${attempt} failed:`, err);
 
-    // Re-number questions sequentially and add to pool
-    parsed.questions.forEach((q, i) => {
-      q.id = allQuestions.length + i + 1;
-      allQuestions.push(q);
-    });
-
-    addLog(`✅ Batch ${batch + 1} done — ${allQuestions.length}/${count} questions ready`, 'done');
-
-    // Small delay between batches to avoid rate limit
-    if (batch < numBatches - 1) {
-      addLog(`⏳ Waiting 3s before next batch...`, 'active');
-      await sleep(3000);
+      if (err.message === 'RATE_LIMIT') {
+        const wait = attempt * 20; // 20s, 40s, 60s
+        addLog(`⏳ Rate limit — waiting ${wait}s then retrying (${attempt}/3)...`, 'active');
+        await sleep(wait * 1000);
+      } else if (attempt < 3) {
+        addLog(`⚠️ Attempt ${attempt} failed: ${err.message.substring(0,60)}. Retrying in 5s...`, 'active');
+        await sleep(5000);
+      }
     }
   }
 
-  addLog(`🎉 All ${allQuestions.length} questions generated successfully!`, 'done');
-  return { topics: allTopics, summary, questions: allQuestions.slice(0, count) };
+  // All 3 attempts failed
+  throw new Error(lastErr?.message || 'Gemini failed after 3 attempts. Check your API key and try again.');
 }
+
 
 // ============================================================
 // GENERATION FLOW
@@ -1853,8 +1823,8 @@ async function startGeneration() {
     APP.fileText = text;
     setProgress(30);
 
-    setStep('AI is analyzing content and generating questions...');
-    addLog('🔍 Analyzing topics and key concepts...', 'active');
+    setStep('AI is reading and understanding your document...');
+    addLog(`🔍 Preparing ${APP.config.count} questions (difficulty: ${APP.config.difficulty})...`, 'active');
     setProgress(40);
 
     const result = await generateQuestionsWithAI(text, APP.config);
