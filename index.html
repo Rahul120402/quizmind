@@ -1603,42 +1603,47 @@ function prepareTextChunk(text, maxWords) {
 
 // Core Gemini API caller
 async function callGemini(promptText) {
-  // gemini-1.5-flash-latest is FREE and has higher rate limits than 2.0
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${APP.apiKey}`;
+  // gemini-1.5-flash is FREE and has higher rate limits than 2.0
+  // Try models in order until one works
+  // Updated June 2026 — verified working models
+  const MODELS = [
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-preview-05-20',
+    'gemini-1.5-flash'
+  ];
 
-  let res;
-  try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: promptText }] }],
-        generationConfig: {
-          temperature: 0.4,
-          maxOutputTokens: 8192,
-          topP: 0.8
-        },
-        safetySettings: [
-          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-        ]
-      })
-    });
-  } catch(e) {
-    throw new Error('Cannot reach Gemini API. Check your internet connection.');
+  let res, lastModelErr;
+  for (const model of MODELS) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${APP.apiKey}`;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: promptText }] }],
+          generationConfig: { temperature: 0.4, maxOutputTokens: 16384, topP: 0.8 },
+          safetySettings: [
+            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+          ]
+        })
+      });
+      if (res.status === 404) { lastModelErr = model + ' not found'; continue; } // try next model
+      if (res.ok) { addLog('✅ Using model: ' + model, 'done'); break; }
+      if (res.status === 429) throw new Error('RATE_LIMIT');
+      if (res.status === 400 || res.status === 403) {
+        const b = await res.json().catch(()=>({}));
+        throw new Error(b?.error?.message || 'API key error ' + res.status);
+      }
+    } catch(fetchErr) {
+      if (fetchErr.message === 'RATE_LIMIT') throw fetchErr;
+      lastModelErr = fetchErr.message;
+      continue;
+    }
   }
-
-  if (!res.ok) {
-    let body = {};
-    try { body = await res.json(); } catch(_) {}
-    const msg = body?.error?.message || '';
-    if (res.status === 400) throw new Error('Bad API key or request. ' + msg);
-    if (res.status === 403) throw new Error('API key blocked. Enable Gemini API at aistudio.google.com. ' + msg);
-    if (res.status === 429) throw new Error('RATE_LIMIT');
-    throw new Error(msg || `HTTP ${res.status}`);
-  }
+  if (!res || !res.ok) throw new Error('No working Gemini model found. ' + lastModelErr);
 
   const json = await res.json();
   const candidate = json.candidates?.[0];
@@ -1650,14 +1655,53 @@ async function callGemini(promptText) {
   return raw;
 }
 
-// Parse JSON safely from Gemini text output
+// Parse JSON safely from Gemini text output — handles truncation
 function parseJSON(raw) {
   // Strip markdown fences
   let s = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
   // Find outermost { }
   const a = s.indexOf('{'), b = s.lastIndexOf('}');
   if (a !== -1 && b !== -1) s = s.slice(a, b + 1);
-  return JSON.parse(s);
+
+  // Try direct parse first
+  try { return JSON.parse(s); } catch(e) {}
+
+  // JSON is truncated — repair it by finding last complete question
+  // Strategy: find last complete closing brace of a question object
+  try {
+    // Find the questions array start
+    const qStart = s.indexOf('"questions"');
+    if (qStart === -1) throw new Error('No questions array found');
+
+    // Find all complete question objects by counting braces
+    let depth = 0, lastCompleteQ = -1, inStr = false, escape = false;
+    const arrStart = s.indexOf('[', qStart);
+    if (arrStart === -1) throw new Error('No questions array bracket');
+
+    for (let i = arrStart; i < s.length; i++) {
+      const ch = s[i];
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === '"' && !escape) { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (ch === '{') depth++;
+      if (ch === '}') {
+        depth--;
+        if (depth === 1) lastCompleteQ = i; // completed a question object
+      }
+    }
+
+    if (lastCompleteQ === -1) throw new Error('No complete questions found');
+
+    // Build repaired JSON
+    const repaired = s.slice(0, lastCompleteQ + 1) + '\n  ]\n}';
+    const parsed = JSON.parse(repaired);
+    console.warn('JSON was truncated — recovered', parsed.questions?.length, 'questions');
+    return parsed;
+  } catch(repairErr) {
+    console.error('JSON repair failed:', repairErr);
+    throw new Error('Response was cut off. Try selecting fewer questions.');
+  }
 }
 
 // Generate all questions in ONE call — most reliable approach
@@ -1681,10 +1725,13 @@ async function generateQuestionsWithAI(text, config) {
   };
   const diffGuide = diffMap[difficulty] || diffMap.medium;
 
-  // Smart text extraction — 3500 words is safe for gemini-1.5-flash-latest
+  // Smart text extraction — 3500 words is safe for gemini-1.5-flash
   const chunk = prepareTextChunk(text, 3500);
 
-  const prompt = `You are an expert exam question designer with 20 years of experience creating high-quality educational assessments.
+  // For large counts, warn user it may take time
+  if (count > 30) addLog(`⚠️ ${count} questions requested — this may take 30-60 seconds...`, 'active');
+
+  const prompt = `You are an expert exam question designer. Generate quiz questions from the document below.
 
 DOCUMENT CONTENT TO USE:
 ---
@@ -1707,24 +1754,10 @@ CRITICAL RULES:
 5. Explanation must clearly justify the correct answer
 6. answer field = 0-based index of correct option in the options array
 
-RESPOND WITH ONLY THIS JSON (no markdown, no explanation, just raw JSON):
-{
-  "topics": ["main topic 1", "main topic 2"],
-  "summary": "2 sentence summary of the document",
-  "questions": [
-    {
-      "id": 1,
-      "type": "mcq",
-      "topic": "topic this question belongs to",
-      "difficulty": "easy",
-      "text": "Full question text here?",
-      "options": ["Option A text", "Option B text", "Option C text", "Option D text"],
-      "answer": 0,
-      "explanation": "Detailed explanation: why answer A is correct, and why B/C/D are wrong.",
-      "timeEstimate": 45
-    }
-  ]
-}`;
+RESPOND WITH ONLY RAW JSON (no markdown, no code fences, no explanation):
+{"topics":["topic1"],"summary":"doc summary","questions":[{"id":1,"type":"mcq","topic":"topic","difficulty":"medium","text":"Question?","options":["A","B","C","D"],"answer":0,"explanation":"Why correct.","timeEstimate":45}]}
+
+Use this compact format for ALL ${count} questions to avoid truncation.`;
 
   // Try up to 3 times with exponential backoff
   let lastErr = null;
