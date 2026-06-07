@@ -1605,11 +1605,11 @@ function prepareTextChunk(text, maxWords) {
 async function callGemini(promptText) {
   // gemini-1.5-flash is FREE and has higher rate limits than 2.0
   // Try models in order until one works
-  // Updated June 2026 — verified working models
+  // Verified working June 2026 — exact API names from Google docs
   const MODELS = [
-    'gemini-2.5-flash',
     'gemini-2.5-flash-preview-05-20',
-    'gemini-1.5-flash'
+    'gemini-2.5-flash-lite-preview-06-17',
+    'gemini-2.5-flash'
   ];
 
   let res, lastModelErr;
@@ -1618,7 +1618,10 @@ async function callGemini(promptText) {
     try {
       res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': APP.apiKey
+        },
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [{ text: promptText }] }],
           generationConfig: { temperature: 0.4, maxOutputTokens: 16384, topP: 0.8 },
@@ -1630,8 +1633,15 @@ async function callGemini(promptText) {
           ]
         })
       });
-      if (res.status === 404) { lastModelErr = model + ' not found'; continue; } // try next model
-      if (res.ok) { addLog('✅ Using model: ' + model, 'done'); break; }
+      if (res.status === 404) {
+        lastModelErr = model + ' not found (404)';
+        addLog('⚠️ Model ' + model + ' not available, trying next...', 'active');
+        continue;
+      } // try next model
+      if (res.ok) {
+        addLog('✅ Connected to: ' + model, 'done');
+        break;
+      }
       if (res.status === 429) throw new Error('RATE_LIMIT');
       if (res.status === 400 || res.status === 403) {
         const b = await res.json().catch(()=>({}));
@@ -1643,7 +1653,9 @@ async function callGemini(promptText) {
       continue;
     }
   }
-  if (!res || !res.ok) throw new Error('No working Gemini model found. ' + lastModelErr);
+  if (!res || !res.ok) {
+    throw new Error('All Gemini models failed. Last error: ' + lastModelErr + '. Check your API key at aistudio.google.com');
+  }
 
   const json = await res.json();
   const candidate = json.candidates?.[0];
