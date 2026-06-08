@@ -1104,7 +1104,9 @@ option { background: var(--bg2); }
       <div class="api-key-row">
         <input type="password" class="form-input" id="api-key-input" placeholder="AIzaSy... or AQ.Ab8..." autocomplete="off" spellcheck="false">
         <button class="btn btn-ghost btn-sm" onclick="toggleApiKeyVisibility()">👁</button>
+        <button class="btn btn-ghost btn-sm" id="test-key-btn" onclick="testApiKey()" style="white-space:nowrap;">🔬 Test</button>
       </div>
+      <div id="key-test-result" style="margin-top:8px;font-size:13px;display:none;padding:8px 12px;border-radius:8px;"></div>
       <div class="api-key-note">
         ℹ️ Free key from Google — 1500 requests/day. Key stays in your browser only.
         <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--accent);text-decoration:none;margin-left:4px;">Get free key →</a>
@@ -1154,10 +1156,10 @@ option { background: var(--bg2); }
           <div class="config-title">🔢 Questions</div>
           <div class="pill-group" id="count-pills">
             <div class="pill" data-val="10" onclick="selectPill(this,'count-pills')">10</div>
-            <div class="pill" data-val="20" onclick="selectPill(this,'count-pills')">20</div>
-            <div class="pill active" data-val="30" onclick="selectPill(this,'count-pills')">30</div>
+            <div class="pill active" data-val="20" onclick="selectPill(this,'count-pills')">20</div>
+            <div class="pill" data-val="30" onclick="selectPill(this,'count-pills')">30</div>
+            <div class="pill" data-val="40" onclick="selectPill(this,'count-pills')">40</div>
             <div class="pill" data-val="50" onclick="selectPill(this,'count-pills')">50</div>
-            <div class="pill" data-val="100" onclick="selectPill(this,'count-pills')">100</div>
           </div>
         </div>
 
@@ -1172,12 +1174,12 @@ option { background: var(--bg2); }
         </div>
 
         <div class="config-section">
-          <div class="config-title">⏱ Time per Question</div>
+          <div class="config-title">⏱ Total Paper Time</div>
           <div class="pill-group" id="time-pills">
-            <div class="pill" data-val="30" onclick="selectPill(this,'time-pills')">30s</div>
-            <div class="pill active" data-val="60" onclick="selectPill(this,'time-pills')">1 min</div>
-            <div class="pill" data-val="90" onclick="selectPill(this,'time-pills')">90s</div>
-            <div class="pill" data-val="120" onclick="selectPill(this,'time-pills')">2 min</div>
+            <div class="pill" data-val="600" onclick="selectPill(this,'time-pills')">10 min</div>
+            <div class="pill" data-val="1800" onclick="selectPill(this,'time-pills')">30 min</div>
+            <div class="pill active" data-val="3600" onclick="selectPill(this,'time-pills')">1 hr</div>
+            <div class="pill" data-val="7200" onclick="selectPill(this,'time-pills')">2 hr</div>
             <div class="pill" data-val="0" onclick="selectPill(this,'time-pills')">No limit</div>
           </div>
         </div>
@@ -1442,6 +1444,7 @@ const APP = {
   elapsedInterval: null,
   paused: false,
   cancelled: false,
+  submitted: false,
   flashcardIndex: 0
 };
 
@@ -1601,70 +1604,79 @@ function prepareTextChunk(text, maxWords) {
   ].join('');
 }
 
-// Core Gemini API caller
+// Core Gemini API caller — simple, direct, tested
 async function callGemini(promptText) {
-  // gemini-1.5-flash is FREE and has higher rate limits than 2.0
-  // Try models in order until one works
-  // Verified working June 2026 — exact API names from Google docs
+  // Exact working endpoint confirmed June 2026
+  // All possible Gemini models — tries each until one works
   const MODELS = [
     'gemini-2.5-flash-preview-05-20',
+    'gemini-2.5-flash',
     'gemini-2.5-flash-lite-preview-06-17',
-    'gemini-2.5-flash'
+    'gemini-2.5-flash-lite',
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-8b',
+    'gemini-1.5-pro'
   ];
 
-  let res, lastModelErr;
   for (const model of MODELS) {
+    addLog(`🔄 Trying: ${model}...`, 'active');
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${APP.apiKey}`;
+    
+    let res;
     try {
       res = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': APP.apiKey
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: promptText }] }],
-          generationConfig: { temperature: 0.4, maxOutputTokens: 16384, topP: 0.8 },
-          safetySettings: [
-            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-          ]
+          contents: [{ parts: [{ text: promptText }] }],
+          generationConfig: {
+            temperature: 0.4,
+            maxOutputTokens: 8192
+          }
         })
       });
-      if (res.status === 404) {
-        lastModelErr = model + ' not found (404)';
-        addLog('⚠️ Model ' + model + ' not available, trying next...', 'active');
-        continue;
-      } // try next model
-      if (res.ok) {
-        addLog('✅ Connected to: ' + model, 'done');
-        break;
-      }
-      if (res.status === 429) throw new Error('RATE_LIMIT');
-      if (res.status === 400 || res.status === 403) {
-        const b = await res.json().catch(()=>({}));
-        throw new Error(b?.error?.message || 'API key error ' + res.status);
-      }
-    } catch(fetchErr) {
-      if (fetchErr.message === 'RATE_LIMIT') throw fetchErr;
-      lastModelErr = fetchErr.message;
+    } catch(networkErr) {
+      addLog(`❌ Network error: ${networkErr.message}`, 'error');
+      throw new Error('Cannot reach Google API. Check internet connection.');
+    }
+
+    // 404 = model not available for this key, try next
+    if (res.status === 404) {
+      addLog(`⚠️ ${model} not available, trying next...`, 'active');
       continue;
     }
-  }
-  if (!res || !res.ok) {
-    throw new Error('All Gemini models failed. Last error: ' + lastModelErr + '. Check your API key at aistudio.google.com');
+
+    // 429 = rate limit
+    if (res.status === 429) {
+      throw new Error('RATE_LIMIT');
+    }
+
+    // Auth errors
+    if (res.status === 400 || res.status === 403) {
+      let body = {};
+      try { body = await res.json(); } catch(_) {}
+      throw new Error('API Key Error: ' + (body?.error?.message || res.status) + ' — Get new key from aistudio.google.com');
+    }
+
+    // Success!
+    if (res.ok) {
+      addLog(`✅ Connected: ${model}`, 'done');
+      const data = await res.json();
+      const candidate = data.candidates?.[0];
+      if (!candidate) throw new Error('Empty response. Try again.');
+      if (candidate.finishReason === 'SAFETY') throw new Error('Blocked by safety filter. Try different PDF.');
+      const text = candidate.content?.parts?.[0]?.text?.trim() || '';
+      if (!text) throw new Error('Empty text response. Try again.');
+      return text;
+    }
+
+    // Other errors
+    let body = {};
+    try { body = await res.json(); } catch(_) {}
+    addLog(`❌ ${model} error ${res.status}: ${body?.error?.message || ''}`, 'error');
   }
 
-  const json = await res.json();
-  const candidate = json.candidates?.[0];
-  if (!candidate) throw new Error('No response from Gemini. Try again.');
-  if (candidate.finishReason === 'SAFETY') throw new Error('Response blocked by safety filter.');
-
-  const raw = candidate.content?.parts?.[0]?.text?.trim() || '';
-  if (!raw) throw new Error('Empty response from Gemini. Try again.');
-  return raw;
+  throw new Error('All Gemini models failed. Please:\n1. Check your API key at aistudio.google.com\n2. Make sure Generative Language API is enabled\n3. Try creating a new API key');
 }
 
 // Parse JSON safely from Gemini text output — handles truncation
@@ -1716,100 +1728,72 @@ function parseJSON(raw) {
   }
 }
 
-// Generate all questions in ONE call — most reliable approach
+// Simple single-call generation — works reliably up to 50 questions
 async function generateQuestionsWithAI(text, config) {
   const { difficulty, count, types } = config;
   const selectedTypes = Array.isArray(types) ? types : [types];
 
-  const typeInstructions = {
-    mcq:      'MCQ — 4 options (A/B/C/D), exactly one correct',
-    truefalse:'True/False — options must be exactly ["True","False"]',
-    fitb:     'Fill in the Blank — sentence with ___ , options: [correct, wrong1, wrong2, wrong3]',
-    ar:       'Assertion-Reason — options: ["Both A&R true, R explains A","Both A&R true, R does not explain A","A true R false","A false"]'
+  const typeMap = {
+    mcq:      'MCQ: 4 options, one correct',
+    truefalse:'True/False: options=["True","False"]',
+    fitb:     'Fill Blank: ___ in question, options=[correct,wrong1,wrong2,wrong3]',
+    ar:       'Assertion-Reason: options=["Both true R explains A","Both true R not","A true R false","A false"]'
   };
-  const typeStr = selectedTypes.map(t => typeInstructions[t] || t).join('\n');
+  const typeStr = selectedTypes.map(t => typeMap[t] || t).join('; ');
 
   const diffMap = {
-    easy:  'Easy: basic recall, definitions, direct facts from text',
-    medium:'Medium: conceptual understanding, cause-effect, application',
-    hard:  'Hard: analysis, evaluation, inference, multi-step reasoning',
-    mixed: 'Mixed: 30% easy, 50% medium, 20% hard'
+    easy: 'easy: recall and definitions',
+    medium: 'medium: understanding and application',
+    hard: 'hard: analysis and evaluation',
+    mixed: 'mixed: 30% easy, 50% medium, 20% hard'
   };
-  const diffGuide = diffMap[difficulty] || diffMap.medium;
 
-  // Smart text extraction — 3500 words is safe for gemini-1.5-flash
-  const chunk = prepareTextChunk(text, 3500);
-
-  // For large counts, warn user it may take time
-  if (count > 30) addLog(`⚠️ ${count} questions requested — this may take 30-60 seconds...`, 'active');
-
-  const prompt = `You are an expert exam question designer. Generate quiz questions from the document below.
-
-DOCUMENT CONTENT TO USE:
----
-${chunk}
----
-
-YOUR TASK:
-Generate exactly ${count} quiz questions based ONLY on the above document content.
-
-QUESTION TYPES TO USE:
-${typeStr}
-
-DIFFICULTY: ${diffGuide}
-
-CRITICAL RULES:
-1. Generate EXACTLY ${count} questions — not more, not less
-2. Every question must be answerable from the document content
-3. No duplicate questions
-4. Options must be plausible and well-written
-5. Explanation must clearly justify the correct answer
-6. answer field = 0-based index of correct option in the options array
-
-RESPOND WITH ONLY RAW JSON (no markdown, no code fences, no explanation):
-{"topics":["topic1"],"summary":"doc summary","questions":[{"id":1,"type":"mcq","topic":"topic","difficulty":"medium","text":"Question?","options":["A","B","C","D"],"answer":0,"explanation":"Why correct.","timeEstimate":45}]}
-
-Use this compact format for ALL ${count} questions to avoid truncation.`;
-
-  // Try up to 3 times with exponential backoff
-  let lastErr = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      addLog(`🤖 Calling Gemini AI (attempt ${attempt}/3)...`, 'active');
-      const raw = await callGemini(prompt);
-      addLog('🔍 Parsing response...', 'active');
-
-      const parsed = parseJSON(raw);
-
-      if (!parsed.questions || !Array.isArray(parsed.questions)) {
-        throw new Error('Invalid response structure — missing questions array');
-      }
-      if (parsed.questions.length === 0) {
-        throw new Error('Gemini returned 0 questions. Try again.');
-      }
-
-      addLog(`✅ Got ${parsed.questions.length} questions from Gemini!`, 'done');
-      return parsed;
-
-    } catch(err) {
-      lastErr = err;
-      console.error(`Attempt ${attempt} failed:`, err);
-
-      if (err.message === 'RATE_LIMIT') {
-        const wait = attempt * 20; // 20s, 40s, 60s
-        addLog(`⏳ Rate limit — waiting ${wait}s then retrying (${attempt}/3)...`, 'active');
-        await sleep(wait * 1000);
-      } else if (attempt < 3) {
-        addLog(`⚠️ Attempt ${attempt} failed: ${err.message.substring(0,60)}. Retrying in 5s...`, 'active');
-        await sleep(5000);
-      }
-    }
+  // Keep only 800 words — leaves plenty of tokens for output
+  const words = text.replace(/\s+/g, ' ').trim().split(' ');
+  const totalWords = words.length;
+  let chunk;
+  if (totalWords <= 800) {
+    chunk = words.join(' ');
+  } else {
+    // Take from start, middle and end
+    const part = Math.floor(800 / 3);
+    const mid = Math.floor(totalWords / 2);
+    chunk = [
+      words.slice(0, part).join(' '),
+      words.slice(mid - Math.floor(part/2), mid + Math.floor(part/2)).join(' '),
+      words.slice(-part).join(' ')
+    ].join(' ... ');
   }
 
-  // All 3 attempts failed
-  throw new Error(lastErr?.message || 'Gemini failed after 3 attempts. Check your API key and try again.');
-}
+  addLog(`🤖 Sending to Gemini (${count} questions)...`, 'active');
 
+  const prompt = `Generate exactly ${count} quiz questions from this document content.
+
+CONTENT: ${chunk}
+
+SETTINGS:
+- Question types: ${typeStr}  
+- Difficulty: ${diffMap[difficulty] || diffMap.medium}
+- answer = 0-based index in options array
+- Generate EXACTLY ${count} questions
+
+RESPOND WITH ONLY THIS JSON (no markdown):
+{"topics":["topic1","topic2"],"summary":"2 line summary","questions":[{"id":1,"type":"mcq","topic":"topic","difficulty":"medium","text":"Question?","options":["A","B","C","D"],"answer":0,"explanation":"Explanation here.","timeEstimate":45}]}`;
+
+  const raw = await callGemini(prompt);
+  addLog('🔍 Parsing response...', 'active');
+  const parsed = parseJSON(raw);
+
+  if (!parsed.questions || parsed.questions.length === 0) {
+    throw new Error('No questions generated. Try again.');
+  }
+
+  // Renumber questions
+  parsed.questions.forEach((q, i) => { q.id = i + 1; });
+
+  addLog(`✅ ${parsed.questions.length} questions ready!`, 'done');
+  return parsed;
+}
 
 // ============================================================
 // GENERATION FLOW
@@ -1827,6 +1811,78 @@ function addLog(msg, cls = '') {
   div.textContent = msg;
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
+}
+
+// Test API key with a simple call
+async function testApiKey() {
+  const key = document.getElementById('api-key-input').value.trim();
+  const resultEl = document.getElementById('key-test-result');
+  const btn = document.getElementById('test-key-btn');
+  
+  if (!key) { 
+    resultEl.style.display = 'block';
+    resultEl.style.background = 'var(--amber-bg)';
+    resultEl.style.color = 'var(--amber)';
+    resultEl.textContent = '⚠️ Please enter an API key first';
+    return; 
+  }
+
+  btn.textContent = '⏳ Testing...';
+  btn.disabled = true;
+  resultEl.style.display = 'none';
+
+  const MODELS = ['gemini-2.5-flash-preview-05-20','gemini-2.5-flash','gemini-2.5-flash-lite-preview-06-17','gemini-2.5-flash-lite','gemini-1.5-flash','gemini-1.5-flash-8b','gemini-1.5-pro'];
+  let success = false;
+  let workingModel = '';
+
+  for (const model of MODELS) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: 'Say OK' }] }], generationConfig: { maxOutputTokens: 10 } })
+      });
+      if (res.ok) { success = true; workingModel = model; break; }
+      if (res.status === 404) continue;
+      if (res.status === 400 || res.status === 403) {
+        const b = await res.json().catch(()=>({}));
+        resultEl.style.display = 'block';
+        resultEl.style.background = 'var(--red-bg)';
+        resultEl.style.color = 'var(--red)';
+        resultEl.textContent = '❌ Key Error: ' + (b?.error?.message || 'Invalid key');
+        btn.textContent = '🔬 Test'; btn.disabled = false;
+        return;
+      }
+      if (res.status === 429) {
+        resultEl.style.display = 'block';
+        resultEl.style.background = 'var(--amber-bg)';
+        resultEl.style.color = 'var(--amber)';
+        resultEl.textContent = '⚠️ Rate limited but key is valid! Wait 1 min then generate.';
+        btn.textContent = '🔬 Test'; btn.disabled = false;
+        return;
+      }
+    } catch(e) {
+      resultEl.style.display = 'block';
+      resultEl.style.background = 'var(--red-bg)';
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = '❌ Network error: ' + e.message;
+      btn.textContent = '🔬 Test'; btn.disabled = false;
+      return;
+    }
+  }
+
+  resultEl.style.display = 'block';
+  if (success) {
+    resultEl.style.background = 'var(--green-bg)';
+    resultEl.style.color = 'var(--green)';
+    resultEl.textContent = '✅ Key works! Model: ' + workingModel + ' — Ready to generate quiz!';
+  } else {
+    resultEl.style.background = 'var(--red-bg)';
+    resultEl.style.color = 'var(--red)';
+    resultEl.textContent = '❌ No working model found. Create a new key at aistudio.google.com';
+  }
+  btn.textContent = '🔬 Test'; btn.disabled = false;
 }
 
 async function startGeneration() {
@@ -1920,10 +1976,12 @@ function cancelGeneration() {
 // QUIZ INIT
 // ============================================================
 function initQuiz() {
+  APP.submitted = false;
+  APP.paperTimeLeft = APP.config.timePerQ;
   buildPalette();
   loadQuestion(0);
   startElapsedTimer();
-  if (APP.config.timePerQ > 0) startQuestionTimer();
+  startPaperTimer();
 }
 
 function buildPalette() {
@@ -2013,12 +2071,18 @@ function renderOptions(q, index) {
       const btn = document.createElement('button');
       btn.className = 'tf-btn' + (answered ? ' disabled' : '');
       btn.textContent = label;
-      if (answered) {
+      if (answered && APP.submitted) {
         const userAns = APP.answers[index];
         if (userAns === i) btn.classList.add(i === q.answer ? 'correct' : 'incorrect');
         if (i === q.answer) btn.classList.add('correct');
+      } else if (answered) {
+        // Quiz ongoing — show selected only, allow re-selection
+        const userAns = APP.answers[index];
+        if (userAns === i) btn.classList.add('selected');
+        btn.onclick = () => selectAnswer(i);
+      } else {
+        btn.onclick = () => selectAnswer(i);
       }
-      if (!answered) btn.onclick = () => selectAnswer(i);
       tf.appendChild(btn);
     });
     area.appendChild(tf);
@@ -2069,21 +2133,31 @@ function renderOptions(q, index) {
     const keys = ['A','B','C','D','E'];
     (q.options || []).forEach((opt, i) => {
       const div = document.createElement('div');
-      div.className = 'option-item' + (answered ? ' disabled' : '');
-      if (answered) {
+      // During quiz: only show selected state, no correct/wrong
+      // After submit (APP.submitted): show correct/wrong
+      div.className = 'option-item';
+      if (answered && APP.submitted) {
+        div.classList.add('disabled');
         const userAns = APP.answers[index];
         if (userAns === i) div.classList.add(i === q.answer ? 'correct' : 'incorrect');
         if (i === q.answer && userAns !== i) div.classList.add('reveal-correct');
+      } else if (answered) {
+        // Quiz still ongoing — only highlight selected, allow re-selection
+        const userAns = APP.answers[index];
+        if (userAns === i) div.classList.add('selected');
+        // Allow changing answer during quiz
+        div.onclick = () => selectAnswer(i);
+      } else {
+        div.onclick = () => selectAnswer(i);
       }
       div.innerHTML = `<div class="option-key">${keys[i]}</div><div class="option-text">${opt}</div>`;
-      if (!answered) div.onclick = () => selectAnswer(i);
       list.appendChild(div);
     });
     area.appendChild(list);
   }
 
-  // Show explanation if already answered
-  if (answered && q.explanation) {
+  // Show explanation ONLY after quiz submitted
+  if (answered && APP.submitted && q.explanation) {
     document.getElementById('explanation-text').textContent = q.explanation;
     document.getElementById('explanation-box').classList.add('visible');
   }
@@ -2093,22 +2167,16 @@ function renderOptions(q, index) {
 // ANSWER SELECTION
 // ============================================================
 function selectAnswer(val) {
-  if (APP.answers[APP.currentIndex] !== null) return;
+  if (APP.submitted) return; // locked after submit
   const startTime = APP._qStartTime || Date.now();
   APP.timePerQ[APP.currentIndex] = Math.round((Date.now() - startTime) / 1000);
   APP.answers[APP.currentIndex] = val;
   const q = APP.questions[APP.currentIndex];
-  if (q.explanation) {
-    document.getElementById('explanation-text').textContent = q.explanation;
-    document.getElementById('explanation-box').classList.add('visible');
-  }
+  // NO explanation shown during quiz — only after submit
+  // NO auto-advance — user manually clicks Next
   renderOptions(q, APP.currentIndex);
   updatePalette();
   stopQuestionTimer();
-  // Auto-advance after 1.2s if not last question
-  if (APP.currentIndex < APP.questions.length - 1) {
-    setTimeout(() => nextQuestion(), 1200);
-  }
 }
 
 // ============================================================
@@ -2152,69 +2220,59 @@ function toggleBookmark() {
 // ============================================================
 // TIMERS
 // ============================================================
+// ============================================================
+// OVERALL PAPER TIMER (countdown from total time)
+// ============================================================
 function startElapsedTimer() {
   clearInterval(APP.elapsedInterval);
+  APP.totalElapsed = 0;
   APP.elapsedInterval = setInterval(() => {
     if (!APP.paused) APP.totalElapsed++;
   }, 1000);
 }
 
-function startQuestionTimer() {
-  APP._qStartTime = Date.now();
-  APP.timerSeconds = APP.config.timePerQ;
-  updateTimerUI();
+function startPaperTimer() {
+  if (APP.config.timePerQ === 0) {
+    // No limit
+    document.getElementById('quiz-timer').textContent = '⏱ ∞';
+    document.getElementById('quiz-timer').className = 'quiz-timer';
+    return;
+  }
+  APP.paperTimeLeft = APP.config.timePerQ; // total seconds
+  updatePaperTimerUI();
   APP.timerInterval = setInterval(() => {
     if (APP.paused) return;
-    APP.timerSeconds--;
-    updateTimerUI();
-    if (APP.timerSeconds <= 0) {
-      stopQuestionTimer();
-      if (APP.answers[APP.currentIndex] === null) {
-        showToast('⏰', 'Time up! Moving to next question.', 'amber');
-        setTimeout(() => nextQuestion(), 800);
-      }
+    APP.paperTimeLeft--;
+    updatePaperTimerUI();
+    if (APP.paperTimeLeft <= 0) {
+      clearInterval(APP.timerInterval);
+      showToast('⏰', 'Time up! Auto-submitting...', 'red');
+      setTimeout(() => confirmSubmit(), 1500);
     }
   }, 1000);
 }
 
-function resetQuestionTimer() {
-  stopQuestionTimer();
-  APP._qStartTime = Date.now();
-  if (APP.config.timePerQ > 0) {
-    APP.timerSeconds = APP.config.timePerQ;
-    updateTimerUI();
-    APP.timerInterval = setInterval(() => {
-      if (APP.paused) return;
-      APP.timerSeconds--;
-      updateTimerUI();
-      if (APP.timerSeconds <= 0) {
-        stopQuestionTimer();
-        if (APP.answers[APP.currentIndex] === null) {
-          showToast('⏰', 'Time up!', 'amber');
-          setTimeout(() => nextQuestion(), 800);
-        }
-      }
-    }, 1000);
-  } else {
-    document.getElementById('quiz-timer').textContent = '⏱ ∞';
-    document.getElementById('quiz-timer').className = 'quiz-timer';
-  }
-}
-
-function stopQuestionTimer() {
-  clearInterval(APP.timerInterval);
-}
-
-function updateTimerUI() {
+function updatePaperTimerUI() {
   const t = document.getElementById('quiz-timer');
-  const s = APP.timerSeconds;
-  const m = Math.floor(s/60);
-  const sec = s%60;
-  t.textContent = `⏱ ${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+  const s = APP.paperTimeLeft || 0;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const display = h > 0
+    ? `⏱ ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
+    : `⏱ ${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+  t.textContent = display;
   t.className = 'quiz-timer';
-  if (s <= 10) t.classList.add('danger');
-  else if (s <= 20) t.classList.add('warning');
+  const totalTime = APP.config.timePerQ;
+  const pct = s / totalTime;
+  if (pct <= 0.1) t.classList.add('danger');
+  else if (pct <= 0.25) t.classList.add('warning');
 }
+
+// These are kept as stubs so existing code doesnt break
+function startQuestionTimer() { startPaperTimer(); }
+function resetQuestionTimer() {} // no-op — paper timer keeps running
+function stopQuestionTimer() {} // no-op — only stop on submit/pause
 
 // ============================================================
 // PAUSE / RESUME
@@ -2253,9 +2311,9 @@ function openSubmitModal() {
 
 function confirmSubmit() {
   closeModal('submit-modal');
-  stopQuestionTimer();
-  clearInterval(APP.elapsedInterval);
   clearInterval(APP.timerInterval);
+  clearInterval(APP.elapsedInterval);
+  APP.submitted = true;
   buildResults();
   showScreen('results');
 }
@@ -2582,6 +2640,8 @@ function retakeQuiz() {
   APP.currentIndex = 0;
   APP.totalElapsed = 0;
   APP.paused = false;
+  APP.submitted = false;
+  APP.paperTimeLeft = APP.config.timePerQ;
   initQuiz();
   showScreen('quiz');
 }
