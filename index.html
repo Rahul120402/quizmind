@@ -1156,10 +1156,10 @@ option { background: var(--bg2); }
           <div class="config-title">🔢 Questions</div>
           <div class="pill-group" id="count-pills">
             <div class="pill" data-val="10" onclick="selectPill(this,'count-pills')">10</div>
-            <div class="pill" data-val="20" onclick="selectPill(this,'count-pills')">20</div>
-            <div class="pill active" data-val="30" onclick="selectPill(this,'count-pills')">30</div>
+            <div class="pill active" data-val="20" onclick="selectPill(this,'count-pills')">20</div>
+            <div class="pill" data-val="30" onclick="selectPill(this,'count-pills')">30</div>
+            <div class="pill" data-val="40" onclick="selectPill(this,'count-pills')">40</div>
             <div class="pill" data-val="50" onclick="selectPill(this,'count-pills')">50</div>
-            <div class="pill" data-val="100" onclick="selectPill(this,'count-pills')">100</div>
           </div>
         </div>
 
@@ -1723,114 +1723,71 @@ function parseJSON(raw) {
   }
 }
 
-// Generate questions in batches of 25 to handle 100 questions
+// Simple single-call generation — works reliably up to 50 questions
 async function generateQuestionsWithAI(text, config) {
   const { difficulty, count, types } = config;
   const selectedTypes = Array.isArray(types) ? types : [types];
 
   const typeMap = {
-    mcq:      'MCQ with 4 options A/B/C/D, one correct',
-    truefalse:'True/False, options must be ["True","False"]',
-    fitb:     'Fill in Blank with ___ in question, options:[correct,wrong1,wrong2,wrong3]',
-    ar:       'Assertion-Reason, options:["Both true R explains A","Both true R not explain A","A true R false","A false"]'
+    mcq:      'MCQ: 4 options, one correct',
+    truefalse:'True/False: options=["True","False"]',
+    fitb:     'Fill Blank: ___ in question, options=[correct,wrong1,wrong2,wrong3]',
+    ar:       'Assertion-Reason: options=["Both true R explains A","Both true R not","A true R false","A false"]'
   };
   const typeStr = selectedTypes.map(t => typeMap[t] || t).join('; ');
 
   const diffMap = {
-    easy:  'Easy: basic recall and definitions',
-    medium:'Medium: understanding and application',
-    hard:  'Hard: analysis and critical thinking',
-    mixed: 'Mixed: 30% easy 50% medium 20% hard'
+    easy: 'easy: recall and definitions',
+    medium: 'medium: understanding and application',
+    hard: 'hard: analysis and evaluation',
+    mixed: 'mixed: 30% easy, 50% medium, 20% hard'
   };
-  const diffGuide = diffMap[difficulty] || diffMap.medium;
 
-  // Smart text preparation
-  const chunk = prepareTextChunk(text, 3000);
-
-  // Batch size of 25 to avoid token limits
-  const BATCH_SIZE = 25;
-  const numBatches = Math.ceil(count / BATCH_SIZE);
-  let allQuestions = [];
-  let allTopics = [];
-  let summary = '';
-
-  addLog(`📦 ${count} questions → ${numBatches} batch(es) of max ${BATCH_SIZE}`, 'active');
-
-  for (let b = 0; b < numBatches; b++) {
-    const batchCount = Math.min(BATCH_SIZE, count - allQuestions.length);
-    const startId = allQuestions.length + 1;
-
-    addLog(`🤖 Batch ${b+1}/${numBatches}: Questions ${startId}–${startId+batchCount-1}...`, 'active');
-    setProgress(40 + ((b / numBatches) * 55));
-
-    const prompt = `You are an exam question designer. Generate exactly ${batchCount} quiz questions from this document.
-These are questions ${startId} to ${startId+batchCount-1} of a total ${count} question quiz.
-${allTopics.length ? 'Topics already found: ' + allTopics.slice(0,5).join(', ') : ''}
-
-DOCUMENT:
-${chunk}
-
-RULES:
-- Exactly ${batchCount} questions, no more no less
-- Types: ${typeStr}
-- Difficulty: ${diffGuide}
-- Only use content from document
-- No duplicate questions
-- answer = 0-based index of correct option
-
-OUTPUT ONLY RAW JSON:
-{"topics":["t1","t2"],"summary":"brief","questions":[{"id":${startId},"type":"mcq","topic":"topic","difficulty":"medium","text":"Q?","options":["A","B","C","D"],"answer":0,"explanation":"Why correct.","timeEstimate":45}]}`;
-
-    let parsed = null;
-    let attempts = 0;
-
-    while (attempts < 3 && !parsed) {
-      try {
-        const raw = await callGemini(prompt);
-        parsed = parseJSON(raw);
-        if (!parsed.questions || parsed.questions.length === 0) {
-          throw new Error('No questions in response');
-        }
-      } catch(err) {
-        attempts++;
-        console.error(`Batch ${b+1} attempt ${attempts} failed:`, err);
-        if (err.message === 'RATE_LIMIT') {
-          addLog(`⏳ Rate limit — waiting 20s... (${attempts}/3)`, 'active');
-          await sleep(20000);
-        } else if (attempts < 3) {
-          addLog(`⚠️ Retrying batch ${b+1}... (${attempts}/3)`, 'active');
-          await sleep(5000);
-        } else {
-          throw new Error(`Batch ${b+1} failed: ${err.message}`);
-        }
-      }
-    }
-
-    // Collect topics from first batch
-    if (b === 0) {
-      allTopics = parsed.topics || [];
-      summary = parsed.summary || '';
-    } else {
-      allTopics = [...new Set([...allTopics, ...(parsed.topics || [])])];
-    }
-
-    // Renumber and add
-    parsed.questions.forEach((q, i) => {
-      q.id = allQuestions.length + i + 1;
-      allQuestions.push(q);
-    });
-
-    addLog(`✅ Batch ${b+1} done — ${allQuestions.length}/${count} questions ready`, 'done');
-
-    // Gap between batches to avoid rate limit
-    if (b < numBatches - 1) {
-      addLog(`⏳ Waiting 8s before next batch...`, 'active');
-      await sleep(8000);
-    }
+  // Keep only 800 words — leaves plenty of tokens for output
+  const words = text.replace(/\s+/g, ' ').trim().split(' ');
+  const totalWords = words.length;
+  let chunk;
+  if (totalWords <= 800) {
+    chunk = words.join(' ');
+  } else {
+    // Take from start, middle and end
+    const part = Math.floor(800 / 3);
+    const mid = Math.floor(totalWords / 2);
+    chunk = [
+      words.slice(0, part).join(' '),
+      words.slice(mid - Math.floor(part/2), mid + Math.floor(part/2)).join(' '),
+      words.slice(-part).join(' ')
+    ].join(' ... ');
   }
 
-  addLog(`🎉 All ${allQuestions.length} questions generated!`, 'done');
-  return { topics: allTopics, summary, questions: allQuestions.slice(0, count) };
+  addLog(`🤖 Sending to Gemini (${count} questions)...`, 'active');
+
+  const prompt = `Generate exactly ${count} quiz questions from this document content.
+
+CONTENT: ${chunk}
+
+SETTINGS:
+- Question types: ${typeStr}  
+- Difficulty: ${diffMap[difficulty] || diffMap.medium}
+- answer = 0-based index in options array
+- Generate EXACTLY ${count} questions
+
+RESPOND WITH ONLY THIS JSON (no markdown):
+{"topics":["topic1","topic2"],"summary":"2 line summary","questions":[{"id":1,"type":"mcq","topic":"topic","difficulty":"medium","text":"Question?","options":["A","B","C","D"],"answer":0,"explanation":"Explanation here.","timeEstimate":45}]}`;
+
+  const raw = await callGemini(prompt);
+  addLog('🔍 Parsing response...', 'active');
+  const parsed = parseJSON(raw);
+
+  if (!parsed.questions || parsed.questions.length === 0) {
+    throw new Error('No questions generated. Try again.');
+  }
+
+  // Renumber questions
+  parsed.questions.forEach((q, i) => { q.id = i + 1; });
+
+  addLog(`✅ ${parsed.questions.length} questions ready!`, 'done');
+  return parsed;
 }
 
 // ============================================================
