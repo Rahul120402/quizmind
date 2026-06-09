@@ -1604,80 +1604,62 @@ function prepareTextChunk(text, maxWords) {
   ].join('');
 }
 
-// Core Gemini API caller — simple, direct, tested
+// Core Gemini API caller
 async function callGemini(promptText) {
-  // Exact working endpoint confirmed June 2026
-  // All possible Gemini models — tries each until one works
   const MODELS = [
     'gemini-2.5-flash-preview-05-20',
     'gemini-2.5-flash',
     'gemini-2.5-flash-lite-preview-06-17',
     'gemini-2.5-flash-lite',
     'gemini-1.5-flash',
-    'gemini-1.5-flash-8b',
     'gemini-1.5-pro'
   ];
 
   for (const model of MODELS) {
-    addLog(`🔄 Trying: ${model}...`, 'active');
+    addLog(`🔄 Trying ${model}...`, 'active');
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${APP.apiKey}`;
-    
     let res;
     try {
       res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: promptText }] }],
-          generationConfig: {
-            temperature: 0.4,
-            maxOutputTokens: 8192
-          }
+          contents: [{ role: 'user', parts: [{ text: promptText }] }],
+          generationConfig: { temperature: 0.4, maxOutputTokens: 8192 },
+          safetySettings: [
+            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+          ]
         })
       });
-    } catch(networkErr) {
-      addLog(`❌ Network error: ${networkErr.message}`, 'error');
-      throw new Error('Cannot reach Google API. Check internet connection.');
+    } catch(e) {
+      addLog(`❌ Network error: ${e.message}`, 'error');
+      throw new Error('Cannot reach Google API. Check internet.');
     }
 
-    // 404 = model not available for this key, try next
-    if (res.status === 404) {
-      addLog(`⚠️ ${model} not available, trying next...`, 'active');
-      continue;
-    }
-
-    // 429 = rate limit
-    if (res.status === 429) {
-      throw new Error('RATE_LIMIT');
-    }
-
-    // Auth errors
+    if (res.status === 404) { addLog(`⚠️ ${model} not found, trying next...`, 'active'); continue; }
+    if (res.status === 429) throw new Error('RATE_LIMIT');
     if (res.status === 400 || res.status === 403) {
-      let body = {};
-      try { body = await res.json(); } catch(_) {}
-      throw new Error('API Key Error: ' + (body?.error?.message || res.status) + ' — Get new key from aistudio.google.com');
+      const b = await res.json().catch(() => ({}));
+      throw new Error('API Key Error: ' + (b?.error?.message || res.status));
     }
 
-    // Success!
     if (res.ok) {
-      addLog(`✅ Connected: ${model}`, 'done');
+      addLog(`✅ Using: ${model}`, 'done');
       const data = await res.json();
       const candidate = data.candidates?.[0];
       if (!candidate) throw new Error('Empty response. Try again.');
-      if (candidate.finishReason === 'SAFETY') throw new Error('Blocked by safety filter. Try different PDF.');
+      if (candidate.finishReason === 'SAFETY') throw new Error('Safety filter blocked response.');
       const text = candidate.content?.parts?.[0]?.text?.trim() || '';
-      if (!text) throw new Error('Empty text response. Try again.');
+      if (!text) throw new Error('Empty text. Try again.');
       return text;
     }
-
-    // Other errors
-    let body = {};
-    try { body = await res.json(); } catch(_) {}
-    addLog(`❌ ${model} error ${res.status}: ${body?.error?.message || ''}`, 'error');
   }
-
-  throw new Error('All Gemini models failed. Please:\n1. Check your API key at aistudio.google.com\n2. Make sure Generative Language API is enabled\n3. Try creating a new API key');
+  throw new Error('All models failed. Check your API key at aistudio.google.com');
 }
+
 
 // Parse JSON safely from Gemini text output — handles truncation
 function parseJSON(raw) {
