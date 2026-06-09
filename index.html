@@ -1139,6 +1139,30 @@ option { background: var(--bg2); }
       <button class="btn btn-ghost btn-sm" onclick="clearFile()">✕ Remove</button>
     </div>
 
+    <!-- PDF Analysis Result -->
+    <div id="pdf-analysis" style="display:none; background:var(--bg2); border:1px solid var(--border); border-radius:var(--radius-lg); padding:18px 20px;">
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
+        <span style="font-size:18px;">🔍</span>
+        <span style="font-size:14px; font-weight:600;">PDF Analysis</span>
+        <span class="badge badge-green" id="analysis-status">Scanning...</span>
+      </div>
+      <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:16px;">
+        <div style="background:var(--bg3); border-radius:var(--radius); padding:12px; text-align:center;">
+          <div style="font-size:20px; font-weight:700; font-family:var(--mono); color:var(--accent);" id="a-words">-</div>
+          <div style="font-size:12px; color:var(--text3);">Words</div>
+        </div>
+        <div style="background:var(--bg3); border-radius:var(--radius); padding:12px; text-align:center;">
+          <div style="font-size:20px; font-weight:700; font-family:var(--mono); color:var(--accent);" id="a-pages">-</div>
+          <div style="font-size:12px; color:var(--text3);">Pages</div>
+        </div>
+        <div style="background:var(--bg3); border-radius:var(--radius); padding:12px; text-align:center;">
+          <div style="font-size:20px; font-weight:700; font-family:var(--mono); color:var(--accent);" id="a-maxq">-</div>
+          <div style="font-size:12px; color:var(--text3);">Max Questions</div>
+        </div>
+      </div>
+      <div id="type-suggestions" style="display:flex; flex-direction:column; gap:8px;"></div>
+    </div>
+
     <!-- Config -->
     <div class="card fade-in">
       <div class="config-grid">
@@ -1166,10 +1190,10 @@ option { background: var(--bg2); }
         <div class="config-section">
           <div class="config-title">📝 Question Types</div>
           <div class="pill-group" id="type-pills">
-            <div class="pill active" data-val="mcq" onclick="selectPill(this,'type-pills',true)">MCQ</div>
-            <div class="pill" data-val="truefalse" onclick="selectPill(this,'type-pills',true)">True/False</div>
-            <div class="pill" data-val="fitb" onclick="selectPill(this,'type-pills',true)">Fill Blank</div>
-            <div class="pill" data-val="ar" onclick="selectPill(this,'type-pills',true)">Assertion-Reason</div>
+            <div class="pill active" data-val="mcq" onclick="selectPill(this,'type-pills',true);onTypeChange()">MCQ</div>
+            <div class="pill" data-val="truefalse" onclick="selectPill(this,'type-pills',true);onTypeChange()">True/False</div>
+            <div class="pill" data-val="fitb" onclick="selectPill(this,'type-pills',true);onTypeChange()">Fill Blank</div>
+            <div class="pill" data-val="ar" onclick="selectPill(this,'type-pills',true);onTypeChange()">Assertion-Reason</div>
           </div>
         </div>
 
@@ -1526,13 +1550,177 @@ function processFile(file) {
   document.getElementById('file-name').textContent = file.name;
   document.getElementById('file-meta').textContent = `${file.name.split('.').pop().toUpperCase()} • ${(file.size/1024).toFixed(1)} KB`;
   document.getElementById('file-preview').classList.add('visible');
+  // Auto-scan PDF after upload
+  scanPDF(file);
+}
+
+// Scan PDF and show smart suggestions
+async function scanPDF(file) {
+  const analysisBox = document.getElementById('pdf-analysis');
+  analysisBox.style.display = 'block';
+  document.getElementById('analysis-status').textContent = 'Scanning...';
+  document.getElementById('analysis-status').className = 'badge badge-amber';
+  document.getElementById('a-words').textContent = '...';
+  document.getElementById('a-pages').textContent = '...';
+  document.getElementById('a-maxq').textContent = '...';
+  document.getElementById('type-suggestions').innerHTML = '';
+
+  try {
+    // Extract text quickly (just count words/pages)
+    const reader = new FileReader();
+    reader.onload = async function(e) {
+      try {
+        let wordCount = 0, pageCount = 0;
+
+        if (file.name.match(/\.(txt|md)$/i)) {
+          const text = new TextDecoder().decode(e.target.result);
+          wordCount = text.split(/\s+/).filter(w => w.length > 0).length;
+          pageCount = Math.ceil(wordCount / 300);
+        } else {
+          const typed = new Uint8Array(e.target.result);
+          pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+          const pdf = await pdfjsLib.getDocument({ data: typed }).promise;
+          pageCount = pdf.numPages;
+          // Quick scan - only first 15 pages for speed
+          for (let i = 1; i <= Math.min(pageCount, 15); i++) {
+            const page = await pdf.getPage(i);
+            const content = await page.getTextContent();
+            wordCount += content.items.map(it => it.str).join(' ').split(/\s+/).filter(w => w.length > 0).length;
+          }
+          // Estimate total if more pages
+          if (pageCount > 15) wordCount = Math.round(wordCount * (pageCount / 15));
+        }
+
+        // Store word count for use in generation
+        APP.scannedWords = wordCount;
+        APP.scannedPages = pageCount;
+
+        // Calculate max questions per type combo
+        // Token math: 8192 total - 800 prompt overhead - (wordCount * 1.3 tokens/word capped at 3500 words)
+        const inputWords = Math.min(wordCount, 3500);
+        const inputTokens = Math.round(inputWords * 1.3) + 800;
+        const outputTokens = 8192 - inputTokens;
+
+        // Tokens per question by type count
+        const tokensPerQ = { 1: 60, 2: 80, 3: 100, 4: 120 };
+
+        const maxByTypes = {
+          1: Math.min(50, Math.floor(outputTokens / tokensPerQ[1])),
+          2: Math.min(50, Math.floor(outputTokens / tokensPerQ[2])),
+          3: Math.min(50, Math.floor(outputTokens / tokensPerQ[3])),
+          4: Math.min(50, Math.floor(outputTokens / tokensPerQ[4]))
+        };
+
+        // Update UI stats
+        document.getElementById('a-words').textContent = wordCount.toLocaleString();
+        document.getElementById('a-pages').textContent = pageCount;
+        document.getElementById('a-maxq').textContent = maxByTypes[1];
+        document.getElementById('analysis-status').textContent = 'Ready';
+        document.getElementById('analysis-status').className = 'badge badge-green';
+
+        // Update file meta
+        document.getElementById('file-meta').textContent =
+          `${file.name.split('.').pop().toUpperCase()} • ${pageCount} pages • ${wordCount.toLocaleString()} words`;
+
+        // Show type-wise suggestions
+        const suggestions = document.getElementById('type-suggestions');
+        const typeLabels = {
+          1: 'MCQ only',
+          2: 'MCQ + True/False',
+          3: 'MCQ + TF + Fill Blank',
+          4: 'All types (MCQ+TF+FITB+AR)'
+        };
+
+        suggestions.innerHTML = '<div style="font-size:12px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">Question count by type selection:</div>';
+
+        [1, 2, 3, 4].forEach(n => {
+          const max = maxByTypes[n];
+          const color = max >= 40 ? 'var(--green)' : max >= 25 ? 'var(--amber)' : 'var(--red)';
+          const emoji = max >= 40 ? '✅' : max >= 25 ? '⚠️' : '❌';
+          suggestions.innerHTML += `
+            <div style="display:flex; justify-content:space-between; align-items:center;
+              padding:10px 14px; background:var(--bg3); border-radius:var(--radius-sm);
+              font-size:13px;">
+              <span style="color:var(--text2);">${emoji} ${typeLabels[n]}</span>
+              <span style="font-weight:700; font-family:var(--mono); color:${color};">
+                Max ${max} questions
+              </span>
+            </div>`;
+        });
+
+        // Also update count pills to not exceed max for current selection
+        updateCountPillsMax(maxByTypes[1]);
+
+      } catch(err) {
+        document.getElementById('analysis-status').textContent = 'Scan failed';
+        document.getElementById('analysis-status').className = 'badge badge-red';
+        console.error('PDF scan error:', err);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  } catch(err) {
+    console.error('scanPDF error:', err);
+  }
+}
+
+// Update count pills max based on PDF capacity
+function updateCountPillsMax(maxQ) {
+  const group = document.getElementById('count-pills');
+
+  // Remove old dynamic max pill if exists
+  const oldMax = group.querySelector('.pill-dynamic-max');
+  if (oldMax) oldMax.remove();
+
+  // Check if maxQ is not already a pill value
+  const existingVals = Array.from(group.querySelectorAll('.pill')).map(p => parseInt(p.dataset.val));
+  const maxIsCustom = !existingVals.includes(maxQ) && maxQ > 0;
+
+  // Add dynamic "Max (N)" pill if needed
+  if (maxIsCustom) {
+    const maxPill = document.createElement('div');
+    maxPill.className = 'pill pill-dynamic-max';
+    maxPill.dataset.val = maxQ;
+    maxPill.textContent = `Max (${maxQ})`;
+    maxPill.style.borderColor = 'var(--green)';
+    maxPill.style.color = 'var(--green)';
+    maxPill.onclick = () => selectPill(maxPill, 'count-pills');
+    group.appendChild(maxPill);
+  }
+
+  // Enable/disable pills based on maxQ
+  group.querySelectorAll('.pill').forEach(pill => {
+    const val = parseInt(pill.dataset.val);
+    if (val > maxQ) {
+      pill.style.opacity = '0.35';
+      pill.style.cursor = 'not-allowed';
+      pill.style.pointerEvents = 'none';
+      pill.title = `Max ${maxQ} for this PDF`;
+    } else {
+      pill.style.opacity = '1';
+      pill.style.cursor = 'pointer';
+      pill.style.pointerEvents = 'auto';
+      pill.title = '';
+    }
+  });
 }
 
 function clearFile() {
   APP.file = null;
   APP.fileText = '';
+  APP.scannedWords = 0;
+  APP.scannedPages = 0;
   document.getElementById('file-preview').classList.remove('visible');
   document.getElementById('file-input').value = '';
+  document.getElementById('pdf-analysis').style.display = 'none';
+  // Reset count pills — remove dynamic max pill and re-enable all
+  const dynPill = document.querySelector('#count-pills .pill-dynamic-max');
+  if (dynPill) dynPill.remove();
+  document.querySelectorAll('#count-pills .pill').forEach(p => {
+    p.style.opacity = '1';
+    p.style.cursor = 'pointer';
+    p.style.pointerEvents = 'auto';
+    p.title = '';
+  });
 }
 
 // ============================================================
@@ -1867,6 +2055,30 @@ async function testApiKey() {
   btn.textContent = '🔬 Test'; btn.disabled = false;
 }
 
+// Recalculate suggestions when user changes question types
+function onTypeChange() {
+  if (!APP.scannedWords) return;
+  const inputWords = Math.min(APP.scannedWords, 3500);
+  const inputTokens = Math.round(inputWords * 1.3) + 800;
+  const outputTokens = 8192 - inputTokens;
+  const typeCount = document.querySelectorAll('#type-pills .pill.active').length;
+  const tokensPerQ = [0, 60, 80, 100, 120][typeCount] || 60;
+  const maxQ = Math.min(50, Math.floor(outputTokens / tokensPerQ));
+  updateCountPillsMax(maxQ);
+  document.getElementById('a-maxq').textContent = maxQ;
+  // Auto-select highest valid count pill (including dynamic max pill)
+  // Small delay to let dynamic pill render first
+  setTimeout(() => {
+    const pills = document.querySelectorAll('#count-pills .pill');
+    let bestPill = pills[0];
+    pills.forEach(p => {
+      if (parseInt(p.dataset.val) <= maxQ) bestPill = p;
+    });
+    document.querySelectorAll('#count-pills .pill').forEach(p => p.classList.remove('active'));
+    bestPill.classList.add('active');
+  }, 50);
+}
+
 async function startGeneration() {
   const apiKey = document.getElementById('api-key-input').value.trim();
   if (!apiKey || apiKey.length < 20) { showToast('⚠️', 'Please enter a valid Gemini API key', 'amber'); return; }
@@ -1883,11 +2095,20 @@ async function startGeneration() {
   // Read config
   APP.config.difficulty = getPillValue('difficulty-pills');
   const countVal = getPillValue('count-pills');
-  APP.config.count = parseInt(typeof countVal === 'string' ? countVal : countVal[0]) || 15;
+  let requestedCount = parseInt(typeof countVal === 'string' ? countVal : countVal[0]) || 20;
   const typesVal = getPillValue('type-pills');
   APP.config.types = Array.isArray(typesVal) ? typesVal : [typesVal];
   const timeVal = getPillValue('time-pills');
-  APP.config.timePerQ = parseInt(typeof timeVal === 'string' ? timeVal : timeVal[0]) || 60;
+  APP.config.timePerQ = parseInt(typeof timeVal === 'string' ? timeVal : timeVal[0]) || 3600;
+
+  // Auto-adjust count based on number of question types selected
+  // More types = more tokens per question = fewer questions fit in budget
+  const typeCount = Array.isArray(APP.config.types) ? APP.config.types.length : 1;
+  const maxSafeCount = typeCount === 1 ? 50 : typeCount === 2 ? 35 : typeCount === 3 ? 25 : 20;
+  APP.config.count = Math.min(requestedCount, maxSafeCount);
+  if (APP.config.count < requestedCount) {
+    showToast('ℹ️', `${typeCount} types selected — auto-adjusted to ${APP.config.count} questions for reliability`, 'amber');
+  }
 
   showScreen('processing');
   document.getElementById('processing-log').innerHTML = '';
