@@ -1111,6 +1111,47 @@ option { background: var(--bg2); }
         ℹ️ Free key from Google — 1500 requests/day. Key stays in your browser only.
         <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--accent);text-decoration:none;margin-left:4px;">Get free key →</a>
       </div>
+
+      <!-- API Key Help -->
+      <div id="api-help-box" style="display:none;margin-top:14px;background:var(--red-bg);border:1px solid rgba(239,68,68,0.3);border-radius:var(--radius);padding:16px 18px;">
+        <div style="font-size:13px;font-weight:600;color:var(--red);margin-bottom:12px;">🔑 API Key Not Working? Follow these steps:</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <div style="display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--text2);">
+            <span style="background:var(--red);color:white;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;margin-top:1px;">1</span>
+            <span>Go to <a href="https://console.cloud.google.com" target="_blank" style="color:var(--accent);">console.cloud.google.com</a> and sign in with your Google account</span>
+          </div>
+          <div style="display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--text2);">
+            <span style="background:var(--red);color:white;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;margin-top:1px;">2</span>
+            <span>Search <strong style="color:var(--text1);">"Gemini API"</strong> in the top search bar → Click first result</span>
+          </div>
+          <div style="display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--text2);">
+            <span style="background:var(--red);color:white;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;margin-top:1px;">3</span>
+            <span>Click <strong style="color:var(--text1);">"Enable"</strong> button (if already enabled, click "Manage")</span>
+          </div>
+          <div style="display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--text2);">
+            <span style="background:var(--red);color:white;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;margin-top:1px;">4</span>
+            <span>Left sidebar → <strong style="color:var(--text1);">APIs & Services → Credentials</strong></span>
+          </div>
+          <div style="display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--text2);">
+            <span style="background:var(--red);color:white;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;margin-top:1px;">5</span>
+            <span>Click <strong style="color:var(--text1);">"+ Create Credentials" → "API Key"</strong></span>
+          </div>
+          <div style="display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--text2);">
+            <span style="background:var(--green);color:white;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;margin-top:1px;">✓</span>
+            <span>Copy the key (starts with <strong style="color:var(--text1);font-family:var(--mono);">AIzaSy...</strong>) and paste it above</span>
+          </div>
+        </div>
+        <div style="margin-top:12px;padding:10px 12px;background:var(--bg2);border-radius:var(--radius-sm);font-size:12px;color:var(--text3);">
+          💡 <strong style="color:var(--amber);">Note:</strong> Google Cloud gives $300 free credits. Card needed for verification but you won't be charged until you manually upgrade.
+        </div>
+        <button onclick="document.getElementById('api-help-box').style.display='none'" style="margin-top:10px;font-size:12px;color:var(--text3);background:none;border:none;cursor:pointer;padding:0;">✕ Close this guide</button>
+      </div>
+
+      <div style="margin-top:8px;">
+        <button onclick="toggleApiHelp()" style="font-size:12px;color:var(--text3);background:none;border:none;cursor:pointer;padding:0;text-decoration:underline;">
+          ❓ API key not working? Click here for help
+        </button>
+      </div>
     </div>
 
     <!-- Upload Zone -->
@@ -1573,6 +1614,12 @@ function getPillValue(groupId) {
 // ============================================================
 // API KEY
 // ============================================================
+function toggleApiHelp() {
+  const box = document.getElementById('api-help-box');
+  box.style.display = box.style.display === 'none' || !box.style.display ? 'block' : 'none';
+  if (box.style.display === 'block') box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
 function toggleBox(id) {
   const box = document.getElementById(id);
   box.style.display = box.style.display === 'none' || !box.style.display ? 'block' : 'none';
@@ -1905,7 +1952,11 @@ async function callGemini(promptText) {
       return text;
     }
   }
-  throw new Error('All models failed. Check your API key at aistudio.google.com');
+  setTimeout(() => {
+    const helpBox = document.getElementById('api-help-box');
+    if (helpBox) { helpBox.style.display = 'block'; }
+  }, 500);
+  throw new Error('All Gemini models failed. Check the help guide on the home screen for steps to fix this.');
 }
 
 
@@ -2080,7 +2131,8 @@ async function testApiKey() {
         resultEl.style.display = 'block';
         resultEl.style.background = 'var(--red-bg)';
         resultEl.style.color = 'var(--red)';
-        resultEl.textContent = '❌ Key Error: ' + (b?.error?.message || 'Invalid key');
+        resultEl.textContent = '❌ Key Error: ' + (b?.error?.message || 'Invalid key') + ' — See help guide below ↓';
+        document.getElementById('api-help-box').style.display = 'block';
         btn.textContent = '🔬 Test'; btn.disabled = false;
         return;
       }
